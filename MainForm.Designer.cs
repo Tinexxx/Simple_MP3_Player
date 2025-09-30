@@ -9,6 +9,9 @@ using NAudio.Wave;
 using NAudio.Dsp;
 using NAudio.Wave.SampleProviders;
 
+// Alias NAudio's Complex to avoid ambiguity with System.Numerics.Complex
+using NAudioComplex = NAudio.Dsp.Complex;
+
 namespace MusicPlayer
 {
     public partial class MainForm : Form
@@ -20,12 +23,11 @@ namespace MusicPlayer
         private ListBox lbTracks;
         private Label lblNowPlaying;
 
-
         private Panel controlPanel;
         private Button btnPrev, btnPlayPause, btnNext, btnStop;
-        private TrackBar trackBarPosition;
+        private CircleTrackBar trackBarPosition; // custom trackbar
         private Label lblTime;
-        private TrackBar tbVolume;
+        private CircleTrackBar tbVolume; // custom trackbar for volume
         private System.Windows.Forms.Timer timer;
 
         // Visualizer control
@@ -40,6 +42,8 @@ namespace MusicPlayer
 
         // visualizer sample provider (wraps audio samples)
         private VisualizerSampleProvider visualizerSampleProvider;
+
+       
 
         private void InitializeComponent()
         {
@@ -83,7 +87,6 @@ namespace MusicPlayer
             leftPanel.Controls.Add(lbTracks);
             leftPanel.Controls.Add(btnSelectFolder);
 
-
             rightPanel = new Panel
             {
                 Dock = DockStyle.Fill,
@@ -100,15 +103,11 @@ namespace MusicPlayer
                 TextAlign = ContentAlignment.MiddleLeft
             };
 
-            // small cover placeholder (prevent null reference if other files expect it)
-
-
             visualizerControl = new VisualizerControl
             {
                 Dock = DockStyle.Fill,
                 BackColor = Color.FromArgb(20, 20, 24)
             };
-
 
             // control panel (bottom)
             controlPanel = new Panel
@@ -123,26 +122,33 @@ namespace MusicPlayer
             btnPlayPause = MakeControlButton(Properties.Resources.play);
             btnNext = MakeControlButton(Properties.Resources.next);
 
-
             btnPrev.Click += BtnPrev_Click;
             btnPlayPause.Click += BtnPlayPause_Click;
             btnNext.Click += BtnNext_Click;
 
-
             // position trackbar and time label
-            trackBarPosition = new TrackBar
+            trackBarPosition = new CircleTrackBar
             {
                 Dock = DockStyle.Top,
                 Height = 45,
                 Minimum = 0,
                 Maximum = 100,
-                TickStyle = TickStyle.None
+                TickStyle = TickStyle.None,
+                // Appearance choices for this instance
+                ThumbSize = 20,
+                TrackColor = Color.FromArgb(100, 100, 100),
+                ProgressColor = Color.FromArgb(220, 220, 220), // light (boldened) progress
+                HoverScale = 1.15f
             };
-            trackBarPosition.MouseDown += (s, e) => isDraggingPosition = true;
+
+            // keep the form-level dragging guard so timer won't fight the drag;
+            // we still rely on CircleTrackBar to update Value while user drags.
+            trackBarPosition.MouseDown += (s, e) => { if (e.Button == MouseButtons.Left) isDraggingPosition = true; };
             trackBarPosition.MouseUp += (s, e) =>
             {
                 if (audioFile != null)
                 {
+                    // when user releases the thumb, seek to the selected second
                     var sec = Math.Clamp(trackBarPosition.Value, trackBarPosition.Minimum, trackBarPosition.Maximum);
                     audioFile.CurrentTime = TimeSpan.FromSeconds(sec);
                 }
@@ -159,7 +165,7 @@ namespace MusicPlayer
             };
 
             // volume
-            tbVolume = new TrackBar
+            tbVolume = new CircleTrackBar
             {
                 Minimum = 0,
                 Maximum = 100,
@@ -167,10 +173,13 @@ namespace MusicPlayer
                 TickStyle = TickStyle.None,
                 Orientation = Orientation.Horizontal,
                 Height = 80,
-                Dock = DockStyle.Right
+                Dock = DockStyle.Right,
+                ThumbSize = 18,
+                TrackColor = Color.FromArgb(100, 100, 100),
+                ProgressColor = Color.FromArgb(220, 220, 220),
+                HoverScale = 1.10f
             };
             tbVolume.ValueChanged += TbVolume_ValueChanged;
-
 
             var buttonsFlow = new FlowLayoutPanel
             {
@@ -183,14 +192,10 @@ namespace MusicPlayer
                 Anchor = AnchorStyles.None     // allow centering
             };
 
-
             buttonsFlow.Location = new Point(
-    (controlPanel.Width - buttonsFlow.PreferredSize.Width) / 2,
-    controlPanel.Height - buttonsFlow.PreferredSize.Height - 5 // small bottom margin
-);
-
-
-
+                (controlPanel.Width - buttonsFlow.PreferredSize.Width) / 2,
+                controlPanel.Height - buttonsFlow.PreferredSize.Height - 5 // small bottom margin
+            );
 
             controlPanel.Resize += (s, e) =>
             {
@@ -202,13 +207,9 @@ namespace MusicPlayer
                 );
             };
 
-
-
-
             buttonsFlow.Controls.Add(btnPrev);
             buttonsFlow.Controls.Add(btnPlayPause);
             buttonsFlow.Controls.Add(btnNext);
-
 
             controlPanel.Controls.Add(buttonsFlow);
             controlPanel.Controls.Add(tbVolume);
@@ -331,6 +332,7 @@ namespace MusicPlayer
                 lblNowPlaying.Text = Path.GetFileNameWithoutExtension(file);
 
                 var totalSeconds = (int)Math.Max(1, audioFile.TotalTime.TotalSeconds);
+                trackBarPosition.Minimum = 0;
                 trackBarPosition.Maximum = totalSeconds;
                 trackBarPosition.Value = 0;
 
@@ -535,7 +537,8 @@ namespace MusicPlayer
 
                     if (fftBufferPos >= fftLength)
                     {
-                        var complex = new Complex[fftLength];
+                        // Use NAudioComplex to avoid ambiguity
+                        var complex = new NAudioComplex[fftLength];
                         for (int n = 0; n < fftLength; n++)
                         {
                             complex[n].X = fftBuffer[n] * window[n];
@@ -885,6 +888,211 @@ namespace MusicPlayer
                 EnsureBlurPath();
                 if (renderBars == null || renderBars.Length != barCount)
                     renderBars = new float[barCount];
+                Invalidate();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Custom TrackBar that draws a white circular thumb, handles mouse drag,
+    /// supports hover growth, and draws a boldened passed portion (progress).
+    /// </summary>
+    public class CircleTrackBar : TrackBar
+    {
+        /// <summary>Base thumb diameter in pixels (normal state).</summary>
+        public int ThumbSize { get; set; } = 18;
+
+        /// <summary>Multiplicative scale to use when hovered (1.0 = no change).</summary>
+        public float HoverScale { get; set; } = 1.15f;
+
+        /// <summary>Color used for the unfilled portion of the track.</summary>
+        public Color TrackColor { get; set; } = Color.FromArgb(120, 120, 120);
+
+        /// <summary>Color used for the passed (filled) portion of the track.</summary>
+        public Color ProgressColor { get; set; } = Color.White;
+
+        /// <summary>Thumb fill and border.</summary>
+        public Color ThumbFill { get; set; } = Color.White;
+        public Color ThumbBorder { get; set; } = Color.FromArgb(50, 50, 50);
+
+        private bool isDraggingThumb = false;
+        private bool isHover = false;
+
+        public CircleTrackBar()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.OptimizedDoubleBuffer |
+                     ControlStyles.UserPaint, true);
+            // Don't set BackColor = Transparent (some controls don't support it).
+            // We'll paint the background from parent in OnPaint.
+        }
+
+        protected override void OnValueChanged(EventArgs e)
+        {
+            base.OnValueChanged(e);
+            Invalidate();
+        }
+
+        protected override void OnScroll(EventArgs e)
+        {
+            base.OnScroll(e);
+            Invalidate();
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            Invalidate();
+        }
+
+        private int CurrentThumbSize => (int)Math.Round(ThumbSize * (isHover ? HoverScale : 1.0f));
+
+        private Rectangle GetThumbRect(int thumbSizeOverride = -1)
+        {
+            int margin = 5;
+            int widthAvailable = Math.Max(1, Width - margin * 2);
+            int range = Math.Max(1, Maximum - Minimum);
+            float percent = (float)(Value - Minimum) / range;
+            int centerX = margin + (int)(percent * (widthAvailable));
+            int centerY = Height / 2;
+            int ts = thumbSizeOverride > 0 ? thumbSizeOverride : CurrentThumbSize;
+            return new Rectangle(centerX - ts / 2, centerY - ts / 2, ts, ts);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            // Clear with parent background so the control visually blends in
+            Color bg = Parent?.BackColor ?? this.BackColor;
+            g.Clear(bg);
+
+            int margin = 5;
+            int widthAvailable = Math.Max(1, Width - margin * 2);
+
+            // track heights - base and boldened for passed part
+            int baseTrackHeight = Math.Max(2, ThumbSize / 5);
+            int progressTrackHeight = Math.Max(baseTrackHeight + 2, ThumbSize / 3);
+
+            // draw the full (unfilled) track first (thin)
+            int trackY = Height / 2 - baseTrackHeight / 2;
+            using (var trackBrush = new SolidBrush(TrackColor))
+            {
+                g.FillRectangle(trackBrush, margin, trackY, Width - margin * 2, baseTrackHeight);
+            }
+
+            // compute thumb center
+            int range = Math.Max(1, Maximum - Minimum);
+            float percent = (float)(Value - Minimum) / range;
+            int centerX = margin + (int)(percent * (widthAvailable));
+            int centerY = Height / 2;
+
+            // draw passed portion (boldened) from left margin to centerX
+            int passedX = margin;
+            int passedWidth = Math.Clamp(centerX - margin, 0, widthAvailable);
+            int passedY = Height / 2 - progressTrackHeight / 2;
+            using (var progressBrush = new SolidBrush(ProgressColor))
+            {
+                g.FillRectangle(progressBrush, passedX, passedY, passedWidth, progressTrackHeight);
+            }
+
+            // draw thumb (with hover, larger)
+            Rectangle thumbRect = GetThumbRect();
+            // optional subtle glow / border when hovered or dragging
+            if (isHover || isDraggingThumb)
+            {
+                // glow: draw a semi-transparent outer ellipse
+                int glowSize = (int)(thumbRect.Width * 1.45f);
+                Rectangle glowRect = new Rectangle(thumbRect.X - (glowSize - thumbRect.Width) / 2,
+                                                   thumbRect.Y - (glowSize - thumbRect.Height) / 2,
+                                                   glowSize, glowSize);
+                using (var glowBrush = new SolidBrush(Color.FromArgb(isDraggingThumb ? 90 : 50, ProgressColor)))
+                {
+                    g.FillEllipse(glowBrush, glowRect);
+                }
+            }
+
+            using (var b = new SolidBrush(ThumbFill))
+                g.FillEllipse(b, thumbRect);
+
+            using (var p = new Pen(ThumbBorder, 1.2f))
+                g.DrawEllipse(p, thumbRect);
+        }
+
+        private void UpdateValueFromMouseX(int mouseX)
+        {
+            int margin = 5;
+            int widthAvailable = Math.Max(1, Width - margin * 2);
+            int x = Math.Clamp(mouseX, margin, margin + widthAvailable);
+            float percent = (float)(x - margin) / (float)widthAvailable;
+            int range = Math.Max(1, Maximum - Minimum);
+            int newValue = Minimum + (int)Math.Round(percent * range);
+            // Ensure within bounds
+            newValue = Math.Clamp(newValue, Minimum, Maximum);
+            if (newValue != this.Value)
+            {
+                this.Value = newValue; // fires ValueChanged
+            }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+
+            if (e.Button == MouseButtons.Left)
+            {
+                Rectangle thumb = GetThumbRect();
+                // start dragging if clicking the thumb OR clicking anywhere on track (common UX)
+                isDraggingThumb = thumb.Contains(e.Location) || (e.Y >= 0 && e.Y <= Height);
+                if (isDraggingThumb)
+                {
+                    UpdateValueFromMouseX(e.X);
+                    this.Capture = true;
+                    Invalidate();
+                }
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+
+            // Hover detection over the thumb center (based on not-yet-resized thumb to allow easy hover)
+            Rectangle thumbNow = GetThumbRect();
+            bool overThumb = thumbNow.Contains(e.Location);
+
+            if (overThumb != isHover)
+            {
+                isHover = overThumb;
+                Invalidate();
+            }
+
+            if (isDraggingThumb && (e.Button & MouseButtons.Left) == MouseButtons.Left)
+            {
+                UpdateValueFromMouseX(e.X);
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (isHover)
+            {
+                isHover = false;
+                Invalidate();
+            }
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+
+            if (isDraggingThumb && e.Button == MouseButtons.Left)
+            {
+                UpdateValueFromMouseX(e.X);
+                isDraggingThumb = false;
+                this.Capture = false;
                 Invalidate();
             }
         }
